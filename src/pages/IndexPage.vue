@@ -8,14 +8,14 @@
           <q-file
             v-model="uploadedFile"
             ref="file"
-            accept=".html"
+            accept=".html, .htm"
             style="display: none"
             @rejected="onRejected"
-            @update:model-value="parseMt5"
+            @update:model-value="parseFile"
           />
           <button
             @click="triggerFileUpload"
-            label="Upload MT5 HTML File"
+            label="Upload MT4/MT5 File"
             class="tw-flex tw-justify-center tw-transition-all hover:tw-opacity-80 tw-ease-linear tw-border-none tw-bg-primary tw-text-white tw-px-3 tw-py-2 tw-rounded-sm"
           >
             <q-icon size="xs" name="fal fa-file-circle-plus" class="tw-mr-2" />
@@ -33,7 +33,7 @@
               </div>
               <div class="tw-ml-3">
                 <p class="tw-text-sm tw-text-indigo-700">
-                  Mt5 must be <b>.html</b> format - Mt4 must be <b>.htm</b>
+                  MT5 must be <b>.html</b> format - MT4 must be <b>.htm</b>
                   format
                 </p>
               </div>
@@ -304,15 +304,15 @@ const customPercent = ref(25); // Default to 25%
 const uploadedFile = ref(null);
 
 const averageLotSize = computed(() => {
-  const totalLots = filteredResults.value.reduce(
-    (acc, trade) => acc + parseFloat(trade.volume),
-    0
-  );
-  return totalLots / filteredResults.value.length;
+  const totalLots = filteredResults.value.reduce((acc, trade) => {
+    return acc + parseFloat(trade.volume || 0); // Ensure volume is parsed as a float, defaulting to 0 if undefined
+  }, 0);
+  return totalLots / filteredResults.value.length || 0; // Handle division by zero if length is 0
 });
 
 const maxLot = computed(() => averageLotSize.value * 2);
 const minLot = computed(() => averageLotSize.value * 0.25);
+
 const totalProfitPercentage = computed(
   () => totalProfit.value * (customPercent.value / 100)
 );
@@ -321,8 +321,13 @@ const dailyProfits = computed(() => {
   const profitMap = {};
 
   filteredResults.value.forEach((trade) => {
-    const date = new Date(trade.exitDate).toISOString().split("T")[0];
-    profitMap[date] = (profitMap[date] || 0) + parseFloat(trade.profit);
+    // Check if trade.exitDate is valid before proceeding
+    if (trade.exitDate) {
+      const date = new Date(trade.exitDate).toISOString().split("T")[0];
+      if (date !== "Invalid Date") {
+        profitMap[date] = (profitMap[date] || 0) + parseFloat(trade.profit);
+      }
+    }
   });
 
   return Object.keys(profitMap).map((date) => {
@@ -449,6 +454,39 @@ const summaryColumns = [
   },
 ];
 
+const rowClass = (row) => {
+  return row.rowIndex % 2 === 0 ? "bg-gray-100" : "";
+};
+
+const errorToast = (message) => {
+  console.error(message);
+};
+
+const buildTradeList = () => {
+  const totalLots = filteredResults.value.reduce(
+    (acc, trade) => acc + parseFloat(trade.volume || 0),
+    0
+  );
+  const avgLotSize = totalLots / filteredResults.value.length || 0;
+
+  totalProfit.value = filteredResults.value.reduce(
+    (acc, trade) =>
+      acc +
+      parseFloat(trade.profit || 0) +
+      parseFloat(trade.commission || 0) +
+      parseFloat(trade.swap || 0),
+    0
+  );
+
+  const maxLotSize = avgLotSize * 2;
+  const minLotSize = avgLotSize * 0.25;
+
+  violations.value = filteredResults.value.filter((trade) => {
+    const volume = parseFloat(trade.volume || 0);
+    return volume < minLotSize || volume > maxLotSize;
+  });
+};
+
 const summaryRows = computed(() => [
   { name: "Average Lot Size", value: formatNumber(averageLotSize.value) },
   {
@@ -462,40 +500,12 @@ const summaryRows = computed(() => [
   },
 ]);
 
-const rowClass = (row) => {
-  return row.rowIndex % 2 === 0 ? "bg-gray-100" : "";
+const formatNumber = (number) => {
+  return parseFloat(number).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 };
-
-const errorToast = (message) => {
-  console.error(message);
-};
-
-const buildTradeList = () => {
-  const totalLots = filteredResults.value.reduce(
-    (acc, trade) => acc + parseFloat(trade.volume),
-    0
-  );
-  const avgLotSize = totalLots / filteredResults.value.length;
-
-  totalProfit.value = filteredResults.value.reduce(
-    (acc, trade) =>
-      acc +
-      parseFloat(trade.profit) +
-      parseFloat(trade.commission) +
-      parseFloat(trade.swap),
-    0
-  );
-
-  const maxLotSize = avgLotSize * 2;
-  const minLotSize = avgLotSize * 0.25;
-
-  violations.value = filteredResults.value.filter(
-    (trade) =>
-      parseFloat(trade.volume) < minLotSize ||
-      parseFloat(trade.volume) > maxLotSize
-  );
-};
-
 const profitRemoved = computed(() => {
   return violations.value.reduce(
     (acc, trade) =>
@@ -521,15 +531,13 @@ const singleTradeViolations = computed(() => {
   );
 });
 
-const formatNumber = (number) => {
-  return parseFloat(number).toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-};
-
 const formatDate = (date) => {
-  return new Date(date).toISOString().split("T")[0];
+  try {
+    return new Date(date).toISOString().split("T")[0];
+  } catch (error) {
+    console.error("Error formatting date:", error);
+    return date; // Return the original date in case of error
+  }
 };
 
 const parseMt5 = (file) => {
@@ -550,12 +558,50 @@ const parseMt5 = (file) => {
   worker.postMessage(file);
 };
 
+const parseMt4 = (file) => {
+  const worker = new Worker("/workers/mt4.js");
+
+  worker.onmessage = (e) => {
+    if (e.data.error) {
+      errorToast(e.data.error);
+      return;
+    }
+
+    if (!e.data.trades) {
+      errorToast("No trades found in the provided file.");
+      return;
+    }
+
+    filteredResults.value = e.data.trades;
+    numTrades.value = e.data.trades.length;
+    console.log("mt4 upload", filteredResults);
+    buildTradeList();
+  };
+
+  worker.onerror = (error) => {
+    errorToast(`Worker error: ${error.message}`);
+  };
+
+  worker.postMessage(file);
+};
+
+const parseFile = (file) => {
+  const extension = file.name.split(".").pop().toLowerCase();
+  if (extension === "html") {
+    parseMt5(file);
+  } else if (extension === "htm") {
+    parseMt4(file);
+  } else {
+    errorToast("Unsupported file format. Please upload a .html or .htm file.");
+  }
+};
+
 const triggerFileUpload = () => {
   document.querySelector("input[type=file]").click();
 };
 
 const onRejected = () => {
-  errorToast("File type not accepted. Please upload a .html file.");
+  errorToast("File type not accepted. Please upload a .html or .htm file.");
 };
 
 const decrementProfitSplit = () => {
